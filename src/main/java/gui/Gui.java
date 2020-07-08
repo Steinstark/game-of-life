@@ -2,6 +2,7 @@ package gui;
 
 import java.awt.Color;
 import java.awt.Component;
+import java.awt.EventQueue;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.event.ActionEvent;
@@ -12,7 +13,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.Semaphore;
 import java.util.function.Consumer;
 
 import javax.swing.JButton;
@@ -28,7 +28,7 @@ import game.Position;
  * 
  * @author Henrik Josefsson 2020-06-30
  */
-public class Gui {
+public class Gui {	
 	
 	/**
 	 * The active cell color (square with a colony in it).
@@ -52,12 +52,26 @@ public class Gui {
 	
 	
 	private final FixedCell cells[][];	
-	private final Semaphore cellLock = new Semaphore(1);
 	private final JButton start = new JButton("Start");
-	private final JButton stop = new JButton("Stop");
-
+	private final JButton stop = new JButton("Stop");	
+	private final JFrame frame = new JFrame();
 	
-	private JFrame frame = new JFrame();
+	
+	/**
+	 * The resume/pause state. Whenever the stop button is pressed this will be set
+	 * to true and false whenever the start button is pressed.
+	 */
+	private boolean isPaused = true;
+	
+	/**
+	 * Whether the board is locked and doesn't respond to mouseclick.
+	 */
+	private boolean boardLocked = false;
+	
+	/**
+	 * Whether any board cell has been manually edited.
+	 */
+	private boolean isDirty = false;
 
 	
 	/**
@@ -98,37 +112,47 @@ public class Gui {
 	 * @param toUpdate The list of colony positions to mark on the game board. May
 	 *                 be empty, but must not be {@code null}.
 	 */
-	public void updateBoard(Collection<Position> toUpdate) throws InterruptedException {
-		Objects.requireNonNull(toUpdate);
-		cellLock.acquire();
-		updateAllCells(c -> c.setBackground(DEAD_CELL_COLOR));
-		for (Position pos : toUpdate) {
-			cells[pos.getX()][pos.getY()].setBackground(LIVING_CELL_COLOR);
-		}		
-		frame.getContentPane().repaint();	
-		cellLock.release();
+	public void updateBoard(Collection<Position> toUpdate) {		
+		EventQueue.invokeLater(new Runnable() {			
+			@Override
+			public void run() {
+				update(toUpdate);
+			}
+		});
 	}
 	
 	/**
-	 * Adds a listener to the start button. Any time the start button is pressed the
-	 * provided listener will be notified.
+	 * Pauses or resumes the game. The game board can only be edited while the game is paused.
 	 * 
-	 * @param toRegister The action listener to register. Must not be {@code null}.
+	 * @param pauseFlag Whether to pause or resume the game.
 	 */
-	public void registerStart(ActionListener toRegister) {
-		Objects.requireNonNull(toRegister);
-		start.addActionListener(toRegister);
+	public synchronized void pause(boolean pauseFlag) {
+		isPaused = pauseFlag;
+		this.notifyAll();
 	}
 	
 	/**
-	 * Adds a listener to the stop button. Any time the stop button is pressed the
-	 * provided listener will be notified.
-	 * 
-	 * @param toRegister The action listener to register. Must not be {@code null}.
+	 * @return {@code true} if stop was the last button to be pressed in the interface.
 	 */
-	public void registerStop(ActionListener toRegister) {
-		Objects.requireNonNull(toRegister);
-		stop.addActionListener(toRegister);
+	public synchronized boolean isPaused() {
+		return isPaused;
+	}
+	
+	/**
+	 * Locks/unlocks the board for manual edit.
+	 * 
+	 * @param lockFlag Whether to lock the board.
+	 */
+	public synchronized void lockBoard(boolean lockFlag) {
+		boardLocked = lockFlag;
+	}
+	
+	/**
+	 * @return Whether the board has been manually edited since last time
+	 *         {@link #getBoardState()} was called.
+	 */
+	public synchronized boolean dirty() {
+		return isDirty;
 	}
 	
 	/**
@@ -155,8 +179,7 @@ public class Gui {
 	 * @return The list of active colony positions. Never {@code null}.
 	 * @throws InterruptedException 
 	 */
-	public List<Position> getBoardState() throws InterruptedException {
-		cellLock.acquire();
+	public synchronized List<Position> getBoardState() {
 		List<Position> colonies = new ArrayList<>();
 		for (int i = 0; i < cells.length; i++) {
 			for (int j = 0; j < cells[0].length; j++) {
@@ -165,10 +188,23 @@ public class Gui {
 				}
 			}
 		}
-		cellLock.release();
+		isDirty = false;
 		return colonies;
 	}
-	
+
+	/**
+	 * Puases execution until the game is unpaused. The game is unpaused by pressing
+	 * the start button in the interface and paused by pressing the stop button.
+	 */
+	public synchronized void waitStart() {
+		while (isPaused) {
+			try {
+				this.wait();
+			} catch (InterruptedException e) {
+				// No op.
+			}
+		}
+	}		
 
 	private void initFrame() {			
 		frame.setBounds(100, 100, 900, 900);
@@ -184,14 +220,13 @@ public class Gui {
 		start.addActionListener(new ActionListener() {			
 			@Override
 			public void actionPerformed(ActionEvent e) {
-				updateAllCells(c -> c.setEnabled(false));
+				pause(false);
 			}
 		});
 		stop.addActionListener(new ActionListener() {			
 			@Override
 			public void actionPerformed(ActionEvent e) {
-				
-				updateAllCells(c -> c.setEnabled(true));
+				pause(true);
 			}
 		});
 		return menu;
@@ -231,17 +266,8 @@ public class Gui {
 					
 					@Override
 					public void mouseClicked(MouseEvent e) {
-						try {
-							cellLock.acquire();
-							Component c = e.getComponent();
-							if (c != null && c.isEnabled()) {
-								Color color = c.getBackground().equals(DEAD_CELL_COLOR) ? LIVING_CELL_COLOR : DEAD_CELL_COLOR;
-								c.setBackground(color);
-							}
-						} catch (InterruptedException ex) {
-							// no op.
-						}		
-						cellLock.release();
+						Component c = e.getComponent();
+						setManualCellColor(c);
 					}
 				});
 				constraint.gridx = i;
@@ -254,11 +280,30 @@ public class Gui {
 		return board;
 	}
 	
+	private synchronized void update(Collection<Position> colonies) {
+		Objects.requireNonNull(colonies);
+		updateAllCells(c -> c.setBackground(DEAD_CELL_COLOR));
+		for (Position pos : colonies) {
+			cells[pos.getX()][pos.getY()].setBackground(LIVING_CELL_COLOR);
+		}		
+		frame.getContentPane().repaint();	
+	}
+	
 	private void updateAllCells(Consumer<FixedCell> consumer) {
 		for(int i = 0; i < cells.length; i++) {
 			for (int j = 0; j < cells[0].length; j++) {
 				consumer.accept(cells[i][j]);
 			}
 		}	
+	}
+	
+	private synchronized void setManualCellColor(Component c) {
+		if (c == null || boardLocked) {
+			return;
+		}
+		Color color = c.getBackground().equals(DEAD_CELL_COLOR) ?
+				LIVING_CELL_COLOR : DEAD_CELL_COLOR;
+		c.setBackground(color);
+		isDirty = true;
 	}
 }
